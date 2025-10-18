@@ -4,16 +4,11 @@ import io
 
 st.set_page_config(page_title="Contract Hierarchy Builder", layout="wide")
 
-st.title("📄 Contract Hierarchy Builder")
-st.write("Upload your Excel file to generate the MSA → SOW → Addendum → Amendment hierarchy")
+st.title("📁 Contract Hierarchy Generator")
+st.write("Upload your Excel file to automatically generate a master–child contract hierarchy.")
 
-uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx"])
-
-if uploaded_file:
-    df = pd.read_excel(uploaded_file)
-    st.write("### Preview of Uploaded Data", df.head())
-
-    required_columns = [
+# Expected columns based on your format
+required_columns = [
     "Original Name",
     "ID",
     "Parent_Child",
@@ -24,54 +19,73 @@ if uploaded_file:
     "Supplier Parent Child agreement links",
     "Effective Date",
     "Expiration Date"
-    ]
+]
 
-    missing = [col for col in required_columns if col not in df.columns]
-    if missing:
-        st.error(f"Missing columns: {', '.join(missing)}")
-    else:
-        st.success("✅ All required columns found!")
+uploaded_file = st.file_uploader("Upload Contract Excel File (.xlsx)", type=["xlsx"])
 
-        results = []
-        for supplier, group in df.groupby("Supplier Legal Entity"):
-            group = group.sort_values("Effective Date")
+if uploaded_file:
+    try:
+        df = pd.read_excel(uploaded_file)
+        st.subheader("✅ Uploaded Data Preview")
+        st.dataframe(df.head())
 
-            msa_rows = group[group["File Name"].str.contains("MSA", case=False, na=False)]
-            for _, msa in msa_rows.iterrows():
-                msa_id = msa["Contract ID"]
+        # Check for required columns
+        missing = [c for c in required_columns if c not in df.columns]
+        if missing:
+            st.error(f"Missing columns in Excel: {', '.join(missing)}")
+        else:
+            st.success("All required columns found ✔️")
 
-                amendments = group[group["Supplier Parent Child Relation"].astype(str).str.contains(str(msa_id), na=False) &
-                                   group["File Name"].str.contains("Amendment", case=False, na=False)]
+            # Build hierarchy
+            st.subheader("📊 Generated Contract Hierarchy")
 
-                sows = group[group["Supplier Parent Child Relation"].astype(str).str.contains(str(msa_id), na=False) &
-                             group["File Name"].str.contains("SOW", case=False, na=False)]
+            # Create hierarchy representation
+            hierarchy_data = []
 
-                for _, sow in sows.iterrows():
-                    sow_id = sow["Contract ID"]
-                    addendums = group[group["Supplier Parent Child Relation"].astype(str).str.contains(str(sow_id), na=False) &
-                                      group["File Name"].str.contains("Addendum", case=False, na=False)]
-
-                    results.append({
-                        "Supplier Legal Entity": supplier,
-                        "Parent Contract (MSA)": msa_id,
-                        "Child Contract (SOW)": sow_id,
-                        "Sub Child (Addendum)": ", ".join(addendums["Contract ID"].astype(str)),
-                        "Amendment(s)": ", ".join(amendments["Contract ID"].astype(str)),
-                        "Hierarchy": "MSA → SOW → Addendum + Amendment"
+            def build_hierarchy(parent_id, level=0):
+                children = df[df["Parent_Child"] == parent_id]
+                for _, row in children.iterrows():
+                    hierarchy_data.append({
+                        "Level": level + 1,
+                        "Contract ID": row["ID"],
+                        "Contract Type": row["Contract Type"],
+                        "Supplier": row["Supplier Legal Entity (Contracts)"],
+                        "Workspace ID": row["Workspace ID"],
+                        "Parent": parent_id
                     })
+                    # Recursive call to find deeper levels
+                    build_hierarchy(row["ID"], level + 1)
 
-        if results:
-            result_df = pd.DataFrame(results)
-            st.write("### 🧾 Contract Hierarchy Output", result_df)
+            # Identify top-level (no parent)
+            top_level = df[df["Parent_Child"].isna() | (df["Parent_Child"] == "")]
+            for _, row in top_level.iterrows():
+                hierarchy_data.append({
+                    "Level": 0,
+                    "Contract ID": row["ID"],
+                    "Contract Type": row["Contract Type"],
+                    "Supplier": row["Supplier Legal Entity (Contracts)"],
+                    "Workspace ID": row["Workspace ID"],
+                    "Parent": None
+                })
+                build_hierarchy(row["ID"])
 
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                result_df.to_excel(writer, index=False)
+            hierarchy_df = pd.DataFrame(hierarchy_data)
+            st.dataframe(hierarchy_df)
+
+            # Download button
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                hierarchy_df.to_excel(writer, index=False, sheet_name='Hierarchy')
+            buffer.seek(0)
+
             st.download_button(
                 label="⬇️ Download Hierarchy Excel",
-                data=output.getvalue(),
+                data=buffer,
                 file_name="Contract_Hierarchy_Output.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-        else:
-            st.warning("No hierarchy found. Please check your file content.")
+
+    except Exception as e:
+        st.error(f"❌ Error processing file: {e}")
+else:
+    st.info("Please upload an Excel file to begin.")
