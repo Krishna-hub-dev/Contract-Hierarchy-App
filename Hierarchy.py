@@ -14,11 +14,16 @@ if uploaded_file:
     st.write("### Preview of Uploaded Data", df.head())
 
     required_columns = [
-        "File Name", "Contract ID", "Supplier Legal Entity",
-        "Company Legal Entity", "Workspace ID",
-        "Effective Date", "Expiration Date",
-        "Supplier Parent Child Relation",
-        "Supplier Signed Date", "Company Signer Date"
+    "Original Name",
+    "ID",
+    "Parent_Child",
+    "Contract Type",
+    "Supplier Legal Entity (Contracts)",
+    "Ariba Supplier Name",
+    "Workspace ID",
+    "Supplier Parent Child agreement links",
+    "Effective Date",
+    "Expiration Date"
     ]
 
     missing = [col for col in required_columns if col not in df.columns]
