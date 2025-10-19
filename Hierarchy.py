@@ -51,11 +51,12 @@ if uploaded_file:
             for _, contract in parentable_contracts.iterrows():
                 
                 # Step 2a: Find related subcontracts using name prefix
-                base_prefix = re.sub(r"-(CO|AM|AMD|SOW).*", "", contract["Original Name"], flags=re.IGNORECASE)
+                safe_name = re.escape(contract["Original Name"])  # Escape special regex characters
+                base_prefix = re.sub(r"-(CO|AM|AMD|SOW).*", "", safe_name, flags=re.IGNORECASE)
                 
                 mask_prefix = (
                     (group["ID"] != contract["ID"]) &
-                    (group["Original Name"].str.startswith(base_prefix)) &
+                    (group["Original Name"].str.startswith(contract["Original Name"].split("-")[0])) &
                     (~group["ID"].isin(processed_subchild_ids)) &
                     (group["Contract Type"].str.contains("Change|Amend|CO|AMD|SOW", case=False, na=False))
                 )
@@ -63,7 +64,8 @@ if uploaded_file:
                 
                 # Step 2b: Check metadata parent-child info
                 mask_metadata = (
-                    group["Supplier Parent Child Link Info"].astype(str).str.contains(contract["Original Name"], case=False, na=False) &
+                    group["Supplier Parent Child Link Info"].astype(str)
+                        .str.contains(safe_name, case=False, na=False) &
                     (~group["ID"].isin(processed_subchild_ids))
                 )
                 metadata_linked_subs = group[mask_metadata]
