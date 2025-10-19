@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 import io
 
-st.set_page_config(page_title="Contract Hierarchy Builder – Tree Logic", layout="wide")
-st.title("📁 Contract Hierarchy Builder – Parent/Child/Subchild Tree")
+st.set_page_config(page_title="Contract Hierarchy Builder – Correct Subchild Logic", layout="wide")
+st.title("📁 Contract Hierarchy Builder – Parent/Child/Subchild Logic")
 
 uploaded_file = st.file_uploader("📤 Upload Contract Excel File (.xlsx)", type=["xlsx"])
 
@@ -28,31 +28,34 @@ if uploaded_file:
         for supplier, group in df.groupby("Supplier Legal Entity (Contracts)"):
             group = group.reset_index(drop=True)
 
-            # Build lookup dictionaries
+            # Build name -> row map
             name_to_row = {row["Original Name"].strip(): row for idx, row in group.iterrows()}
 
-            # Build parent-child mapping using Supplier Parent Child Link Info
-            tree_map = {}  # parent_name -> list of child names
-            referenced_by_map = {}  # contract_name -> list of contracts referencing it
+            # Build reference maps
+            # referenced_by_map: contract_name -> list of contracts referencing it
+            referenced_by_map = {}
+            # references_map: contract_name -> list of contracts it references
+            references_map = {}
 
             for idx, row in group.iterrows():
                 name = row["Original Name"].strip()
                 link_info = str(row.get("Supplier Parent Child Link Info", "")).upper()
-                if link_info:
-                    for ref in link_info.split(';'):
-                        ref = ref.strip()
-                        if not ref:
-                            continue
-                        tree_map.setdefault(ref, []).append(name)
-                        referenced_by_map.setdefault(name, []).append(ref)
+                references = [l.strip() for l in link_info.split(';') if l.strip()]
+                references_map[name] = references
+                for ref in references:
+                    referenced_by_map.setdefault(ref, []).append(name)
 
-            # Identify Parent contracts (MSA, Service Agreement, Technology Agreement, Product & Service Agreement)
+            # Identify Parents (MSA, Service Agreement, Technology Agreement, Product & Service Agreement)
             parent_mask = group["Contract Type"].str.contains(
                 "MSA|Service Agreement|Technology Agreement|Product and Service Agreement", case=False, na=False)
             parents = [row["Original Name"].strip() for idx, row in group[parent_mask].iterrows()]
 
+            added_contracts = set()
+
             # Recursive function to traverse hierarchy
             def traverse(contract_name, hierarchy_type):
+                if contract_name in added_contracts:
+                    return
                 row = name_to_row[contract_name]
                 output_rows.append({
                     "FileName": contract_name,
@@ -62,35 +65,41 @@ if uploaded_file:
                     "PartyName": supplier,
                     "Ariba Supplier Name": row.get("Ariba Supplier Name", "")
                 })
-                # Process children
-                children = tree_map.get(contract_name, [])
-                for child_name in children:
-                    # Determine child type
-                    if child_name in tree_map:  # this child has its own children → Child/Parent
+                added_contracts.add(contract_name)
+
+                # Determine children
+                for child_name in referenced_by_map.get(contract_name, []):
+                    # Child/Parent if it has its own children
+                    if referenced_by_map.get(child_name):
                         traverse(child_name, "Child/Parent")
                     else:
-                        # Check if child references any Child/Parent to become Subchild
-                        links = referenced_by_map.get(child_name, [])
-                        if any(l in tree_map for l in links):
+                        # Subchild if it references a Child/Parent
+                        refs = references_map.get(child_name, [])
+                        if any(r in referenced_by_map for r in refs):
                             traverse(child_name, "Subchild")
                         else:
                             traverse(child_name, "Child")
 
-            # Traverse all Parent contracts first
+            # First, traverse all Parents
             for p in parents:
                 traverse(p, "Parent")
 
-            # Add remaining contracts not linked anywhere (orphans)
-            all_added = set([row["FileName"] for row in output_rows])
+            # Then, traverse remaining contracts not yet added
             for idx, row in group.iterrows():
                 name = row["Original Name"].strip()
-                if name not in all_added:
-                    traverse(name, "Child")
+                if name not in added_contracts:
+                    # Determine type
+                    if referenced_by_map.get(name):
+                        traverse(name, "Child/Parent")
+                    elif any(r in referenced_by_map for r in references_map.get(name, [])):
+                        traverse(name, "Subchild")
+                    else:
+                        traverse(name, "Child")
 
         # Convert output to DataFrame
         output_df = pd.DataFrame(output_rows)
 
-        st.subheader("📊 Generated Contract Hierarchy (Tree Order)")
+        st.subheader("📊 Generated Contract Hierarchy (Parent → Child → Child/Parent → Subchild)")
         st.dataframe(output_df)
 
         # Excel download
