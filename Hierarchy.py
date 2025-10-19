@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 import io
 
-st.set_page_config(page_title="Contract Hierarchy Builder", layout="wide")
-st.title("📁 Contract Hierarchy Builder – Two-Pass Accurate Hierarchy")
+st.set_page_config(page_title="Contract Hierarchy Builder – Tree Logic", layout="wide")
+st.title("📁 Contract Hierarchy Builder – Parent/Child/Subchild Tree")
 
 uploaded_file = st.file_uploader("📤 Upload Contract Excel File (.xlsx)", type=["xlsx"])
 
@@ -11,7 +11,7 @@ if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
 
-        # Standardize columns and text
+        # Standardize columns
         df.columns = df.columns.str.strip()
         df["Contract Type"] = df["Contract Type"].astype(str)
         df["Original Name"] = df["Original Name"].astype(str)
@@ -24,87 +24,76 @@ if uploaded_file:
 
         output_rows = []
 
-        # Process supplier by supplier
+        # Process each supplier separately
         for supplier, group in df.groupby("Supplier Legal Entity (Contracts)"):
             group = group.reset_index(drop=True)
 
-            # Step 1: Build a reference map from 'Supplier Parent Child Link Info'
-            # key = contract name, value = list of contracts that reference it
-            reference_map = {}
-            name_to_row = {}
+            # Build lookup dictionaries
+            name_to_row = {row["Original Name"].strip(): row for idx, row in group.iterrows()}
+
+            # Build parent-child mapping using Supplier Parent Child Link Info
+            tree_map = {}  # parent_name -> list of child names
+            referenced_by_map = {}  # contract_name -> list of contracts referencing it
 
             for idx, row in group.iterrows():
-                contract_name = row["Original Name"].strip()
-                name_to_row[contract_name] = row
+                name = row["Original Name"].strip()
                 link_info = str(row.get("Supplier Parent Child Link Info", "")).upper()
                 if link_info:
-                    for ref_name in link_info.split(';'):  # assume multiple references separated by ';'
-                        ref_name = ref_name.strip()
-                        if ref_name:
-                            reference_map.setdefault(ref_name, []).append(contract_name)
+                    for ref in link_info.split(';'):
+                        ref = ref.strip()
+                        if not ref:
+                            continue
+                        tree_map.setdefault(ref, []).append(name)
+                        referenced_by_map.setdefault(name, []).append(ref)
 
-            # Step 2: Identify Parent contracts (MSA, Service Agreements, Technology Agreements, Product & Service Agreements)
+            # Identify Parent contracts (MSA, Service Agreement, Technology Agreement, Product & Service Agreement)
             parent_mask = group["Contract Type"].str.contains(
                 "MSA|Service Agreement|Technology Agreement|Product and Service Agreement", case=False, na=False)
-            parents = [row["Original Name"] for idx, row in group[parent_mask].iterrows()]
+            parents = [row["Original Name"].strip() for idx, row in group[parent_mask].iterrows()]
 
-            # Step 3: Assign hierarchy types
-            hierarchy = {}
-
-            # Assign Parent contracts first
-            for p in parents:
-                hierarchy[p] = "Parent"
-
-            # Assign Child/Subchild/Child-Parent based on references
-            for idx, row in group.iterrows():
-                contract_name = row["Original Name"].strip()
-                if contract_name in hierarchy:
-                    continue  # already assigned as Parent
-
-                # Check if this contract references a Parent or Child/Parent
-                link_info = str(row.get("Supplier Parent Child Link Info", "")).upper()
-                linked_parents = [name for name in parents if name.upper() in link_info]
-
-                # Determine type
-                if linked_parents:
-                    hierarchy[contract_name] = "Child"
-                else:
-                    # Check if other contracts reference this one
-                    referenced_by = reference_map.get(contract_name, [])
-                    if referenced_by:
-                        hierarchy[contract_name] = "Child/Parent"
-                    else:
-                        hierarchy[contract_name] = "Child"
-
-            # Step 4: Adjust Subchilds: any contract that references a Child/Parent becomes Subchild
-            for idx, row in group.iterrows():
-                contract_name = row["Original Name"].strip()
-                if hierarchy[contract_name] == "Child":
-                    # Check if it references a Child/Parent
-                    link_info = str(row.get("Supplier Parent Child Link Info", "")).upper()
-                    child_parent_names = [n for n, t in hierarchy.items() if t == "Child/Parent"]
-                    if any(cp.upper() in link_info for cp in child_parent_names):
-                        hierarchy[contract_name] = "Subchild"
-
-            # Step 5: Build output rows maintaining original order
-            for idx, row in group.iterrows():
-                contract_name = row["Original Name"].strip()
+            # Recursive function to traverse hierarchy
+            def traverse(contract_name, hierarchy_type):
+                row = name_to_row[contract_name]
                 output_rows.append({
                     "FileName": contract_name,
                     "ContractID": row["ID"],
-                    "Parent_Child": hierarchy[contract_name],
+                    "Parent_Child": hierarchy_type,
                     "ContractType": row["Contract Type"],
                     "PartyName": supplier,
                     "Ariba Supplier Name": row.get("Ariba Supplier Name", "")
                 })
+                # Process children
+                children = tree_map.get(contract_name, [])
+                for child_name in children:
+                    # Determine child type
+                    if child_name in tree_map:  # this child has its own children → Child/Parent
+                        traverse(child_name, "Child/Parent")
+                    else:
+                        # Check if child references any Child/Parent to become Subchild
+                        links = referenced_by_map.get(child_name, [])
+                        if any(l in tree_map for l in links):
+                            traverse(child_name, "Subchild")
+                        else:
+                            traverse(child_name, "Child")
 
-        # Step 6: Convert to DataFrame
+            # Traverse all Parent contracts first
+            for p in parents:
+                traverse(p, "Parent")
+
+            # Add remaining contracts not linked anywhere (orphans)
+            all_added = set([row["FileName"] for row in output_rows])
+            for idx, row in group.iterrows():
+                name = row["Original Name"].strip()
+                if name not in all_added:
+                    traverse(name, "Child")
+
+        # Convert output to DataFrame
         output_df = pd.DataFrame(output_rows)
 
-        st.subheader("📊 Generated Contract Hierarchy (Ordered & Nested)")
+        st.subheader("📊 Generated Contract Hierarchy (Tree Order)")
         st.dataframe(output_df)
 
-        # Step 7: Excel Download
+        # Excel download
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             output_df.to_excel(writer, index=False, sheet_name="Hierarchy_Output")
