@@ -2,43 +2,98 @@ import streamlit as st
 import pandas as pd
 import io
 
-# Streamlit App Title
-st.title("📄 Contract Hierarchy Generator")
+st.set_page_config(page_title="Contract Hierarchy Builder", layout="wide")
 
-# Step 1: Upload Excel file
-uploaded_file = st.file_uploader("📤 Upload your Contracts Excel file", type=["xlsx"])
+st.title("📁 Contract Hierarchy Generator")
+st.write("Upload your Excel file to automatically generate a master–child contract hierarchy and export it.")
 
-if uploaded_file is not None:
-    # Step 2: Read the uploaded file
-    df = pd.read_excel(uploaded_file)
-    st.success("✅ File uploaded successfully!")
+# Expected columns
+required_columns = [
+    "Original Name",
+    "ID",
+    "Parent_Child",
+    "Contract Type",
+    "Supplier Legal Entity (Contracts)",
+    "Ariba Supplier Name",
+    "Workspace ID",
+    "Supplier Parent Child agreement links",
+    "Effective Date",
+    "Expiration Date"
+]
 
-    # --- Sample logic to create output (replace with your processing logic) ---
-    output = pd.DataFrame()
+uploaded_file = st.file_uploader("📤 Upload Contract Excel File (.xlsx)", type=["xlsx"])
 
-    # Create output columns (example placeholders)
-    output["FileName"] = df["File Name"]
-    output["ContractID"] = df["Contract ID"]
-    output["Parent_Child"] = df["Parent/Child Relation"]
-    output["ContractType"] = df["Contract Type"]
-    output["PartyName"] = df["Supplier Legal Entity"]
-    output["Ariba Supplier Name"] = df["Company Legal Entity"]  # Updated as per your note
-    output["Workspace ID"] = df["Workspace ID"]
+if uploaded_file:
+    try:
+        df = pd.read_excel(uploaded_file)
+        st.subheader("✅ Uploaded Data Preview")
+        st.dataframe(df.head())
 
-    # --- Display output preview ---
-    st.write("### 🧾 Processed Output Preview")
-    st.dataframe(output)
+        # Check required columns
+        missing = [c for c in required_columns if c not in df.columns]
+        if missing:
+            st.error(f"⚠️ Missing columns in Excel: {', '.join(missing)}")
+        else:
+            st.success("✅ All required columns found!")
 
-    # Step 3: Option to download processed Excel
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        output.to_excel(writer, index=False, sheet_name="Contract_Hierarchy")
-    st.download_button(
-        label="📥 Download Processed Excel",
-        data=buffer,
-        file_name="Contract_Hierarchy_Output.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+            # --- Build hierarchy structure ---
+            st.subheader("📊 Generated Contract Hierarchy")
 
+            output_rows = []
+
+            def build_hierarchy(parent_id, parent_type="Parent"):
+                """Recursive function to build Parent → Child → Sub Child hierarchy."""
+                children = df[df["Parent_Child"] == parent_id]
+
+                for _, row in children.iterrows():
+                    output_rows.append({
+                        "FileName": row["Original Name"],
+                        "ContractID": row["ID"],
+                        "Parent_Child": parent_type,
+                        "ContractType": row["Contract Type"],
+                        "PartyName": row["Supplier Legal Entity (Contracts)"],
+                        "Ariba Supplier Name": row["Ariba Supplier Name"],
+                        "Workspace ID": row["Workspace ID"]
+                    })
+
+                    # Find sub-children of this contract
+                    build_hierarchy(row["ID"], "Sub Child")
+
+            # Identify top-level parents (where Parent_Child is empty or NaN)
+            top_level_contracts = df[df["Parent_Child"].isna() | (df["Parent_Child"] == "")]
+            for _, row in top_level_contracts.iterrows():
+                output_rows.append({
+                    "FileName": row["Original Name"],
+                    "ContractID": row["ID"],
+                    "Parent_Child": "Parent",
+                    "ContractType": row["Contract Type"],
+                    "PartyName": row["Supplier Legal Entity (Contracts)"],
+                    "Ariba Supplier Name": row["Ariba Supplier Name"],
+                    "Workspace ID": row["Workspace ID"]
+                })
+                # Build hierarchy for its children
+                build_hierarchy(row["ID"], "Child")
+
+            # Create final DataFrame
+            output_df = pd.DataFrame(output_rows)
+
+            st.write("### 🧾 Final Output Preview")
+            st.dataframe(output_df)
+
+            # Download section
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                output_df.to_excel(writer, index=False, sheet_name="Contract_Hierarchy")
+            buffer.seek(0)
+
+            st.download_button(
+                label="📥 Download Hierarchy Excel",
+                data=buffer,
+                file_name="Contract_Hierarchy_Output.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+    except Exception as e:
+        st.error(f"❌ Error while processing the file: {e}")
 else:
-    st.info("👆 Please upload an Excel file to get started.")
+    st.info("👆 Please upload your Excel file to begin.")
