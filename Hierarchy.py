@@ -1,61 +1,44 @@
+import streamlit as st
 import pandas as pd
-import re
+import io
 
-# === CONFIG ===
-input_file = "Contracts_Input.xlsx"     # your source Excel file
-output_file = "Hierarchy_Output.xlsx"   # name of the output Excel
+# Streamlit App Title
+st.title("📄 Contract Hierarchy Generator")
 
-# === STEP 1: Load the input Excel ===
-df = pd.read_excel(input_file)
+# Step 1: Upload Excel file
+uploaded_file = st.file_uploader("📤 Upload your Contracts Excel file", type=["xlsx"])
 
-# Ensure consistent column names
-df.columns = df.columns.str.strip().str.lower()
+if uploaded_file is not None:
+    # Step 2: Read the uploaded file
+    df = pd.read_excel(uploaded_file)
+    st.success("✅ File uploaded successfully!")
 
-# Example: expected columns might include:
-# 'filename', 'workspace id', 'ariba supplier name', 'partyname', 'contract type', 'relation'
+    # --- Sample logic to create output (replace with your processing logic) ---
+    output = pd.DataFrame()
 
-# === STEP 2: Initialize output DataFrame ===
-output = pd.DataFrame(columns=[
-    "FileName",
-    "ContractID",
-    "Parent_Child",
-    "ContractType",
-    "PartyName",
-    "Ariba Supplier Name",
-    "Workspace ID"
-])
+    # Create output columns (example placeholders)
+    output["FileName"] = df["File Name"]
+    output["ContractID"] = df["Contract ID"]
+    output["Parent_Child"] = df["Parent/Child Relation"]
+    output["ContractType"] = df["Contract Type"]
+    output["PartyName"] = df["Supplier Legal Entity"]
+    output["Ariba Supplier Name"] = df["Company Legal Entity"]  # Updated as per your note
+    output["Workspace ID"] = df["Workspace ID"]
 
-# === STEP 3: Extract ContractID from filename ===
-def extract_contract_id(filename):
-    match = re.search(r'CW\d+', str(filename))
-    return match.group(0) if match else ""
+    # --- Display output preview ---
+    st.write("### 🧾 Processed Output Preview")
+    st.dataframe(output)
 
-df["contract_id"] = df["filename"].apply(extract_contract_id)
+    # Step 3: Option to download processed Excel
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        output.to_excel(writer, index=False, sheet_name="Contract_Hierarchy")
+    st.download_button(
+        label="📥 Download Processed Excel",
+        data=buffer,
+        file_name="Contract_Hierarchy_Output.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
-# === STEP 4: Determine Hierarchy type ===
-def classify_relation(row):
-    relation = str(row.get("relation", "")).lower()
-    if "parent" in relation and "child" in relation:
-        return "Child/Parent"
-    elif "parent" in relation:
-        return "Parent"
-    elif "sub" in relation:
-        return "Sub Child"
-    elif "child" in relation:
-        return "Child"
-    return "Unknown"
-
-df["Parent_Child"] = df.apply(classify_relation, axis=1)
-
-# === STEP 5: Map to output columns ===
-output["FileName"] = df["filename"]
-output["ContractID"] = df["contract_id"]
-output["Parent_Child"] = df["Parent_Child"]
-output["ContractType"] = df["contract type"]
-output["PartyName"] = df["partyname"]
-output["Ariba Supplier Name"] = df["ariba supplier name"]
-output["Workspace ID"] = df["workspace id"]
-
-# === STEP 6: Export to Excel ===
-output.to_excel(output_file, index=False)
-print(f"✅ Hierarchy Excel generated successfully: {output_file}")
+else:
+    st.info("👆 Please upload an Excel file to get started.")
