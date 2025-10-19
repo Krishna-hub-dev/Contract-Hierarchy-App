@@ -3,15 +3,15 @@ import pandas as pd
 import io
 import re
 
-st.set_page_config(page_title="Generalized Contract Hierarchy Builder", layout="wide")
-st.title("📁 Generalized Contract Hierarchy Generator")
+st.set_page_config(page_title="Contract Hierarchy Builder", layout="wide")
+st.title("📁 Contract Hierarchy Generator – Sequenced Output")
 
 uploaded_file = st.file_uploader("📤 Upload Contract Excel File (.xlsx)", type=["xlsx"])
 
 if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
-        
+
         # Normalize columns
         df.columns = df.columns.str.strip()
         df["Contract Type"] = df["Contract Type"].astype(str)
@@ -41,19 +41,19 @@ if uploaded_file:
                     "PartyName": supplier,
                     "Ariba Supplier Name": msa["Ariba Supplier Name"]
                 })
-            
+
             # Step 2: Identify Parentable Contracts (TOs, SOWs, other non-MSA contracts)
             parentable_contracts = group[~group["Contract Type"].str.contains("MSA", case=False, na=False)]
             
-            # Track all processed sub-child IDs to avoid duplication
             processed_subchild_ids = set()
-            
+
             for _, contract in parentable_contracts.iterrows():
-                
-                # Step 2a: Find related subcontracts using name prefix
-                safe_name = re.escape(contract["Original Name"])  # Escape special regex characters
+
+                # Escape regex special characters
+                safe_name = re.escape(contract["Original Name"])
                 base_prefix = re.sub(r"-(CO|AM|AMD|SOW).*", "", safe_name, flags=re.IGNORECASE)
-                
+
+                # Step 2a: Find related subcontracts using prefix
                 mask_prefix = (
                     (group["ID"] != contract["ID"]) &
                     (group["Original Name"].str.startswith(contract["Original Name"].split("-")[0])) &
@@ -61,7 +61,7 @@ if uploaded_file:
                     (group["Contract Type"].str.contains("Change|Amend|CO|AMD|SOW", case=False, na=False))
                 )
                 related_subs = group[mask_prefix]
-                
+
                 # Step 2b: Check metadata parent-child info
                 mask_metadata = (
                     group["Supplier Parent Child Link Info"].astype(str)
@@ -69,13 +69,13 @@ if uploaded_file:
                     (~group["ID"].isin(processed_subchild_ids))
                 )
                 metadata_linked_subs = group[mask_metadata]
-                
+
                 # Combine both sources
                 total_subs = pd.concat([related_subs, metadata_linked_subs]).drop_duplicates("ID")
-                
+
                 relation_type = "Child/Parent" if not total_subs.empty else "Child"
-                
-                # Add the parentable contract
+
+                # Add the parentable contract first
                 output_rows.append({
                     "FileName": contract["Original Name"],
                     "ContractID": contract["ID"],
@@ -84,8 +84,8 @@ if uploaded_file:
                     "PartyName": supplier,
                     "Ariba Supplier Name": contract["Ariba Supplier Name"]
                 })
-                
-                # Step 3: Add Sub Child contracts
+
+                # Step 3: Add Sub Child contracts immediately after their parent
                 for _, sub in total_subs.iterrows():
                     output_rows.append({
                         "FileName": sub["Original Name"],
@@ -96,7 +96,7 @@ if uploaded_file:
                         "Ariba Supplier Name": sub["Ariba Supplier Name"]
                     })
                     processed_subchild_ids.add(sub["ID"])
-            
+
             # Step 4: Handle orphan contracts (not yet processed)
             remaining = group[~group["ID"].isin([row["ContractID"] for row in output_rows])]
             for _, orphan in remaining.iterrows():
@@ -111,23 +111,31 @@ if uploaded_file:
 
         # Create output DataFrame
         output_df = pd.DataFrame(output_rows)
-        
+
+        # Define hierarchy order for sorting
+        hierarchy_order = {"Parent": 0, "Child": 1, "Child/Parent": 2, "Sub Child": 3}
+        output_df["Hierarchy_Order"] = output_df["Parent_Child"].map(hierarchy_order)
+
+        # Sort by PartyName and then Hierarchy_Order (keeps children immediately under their parent)
+        output_df = output_df.sort_values(by=["PartyName", "Hierarchy_Order", "FileName"]).reset_index(drop=True)
+        output_df.drop(columns=["Hierarchy_Order"], inplace=True)
+
         st.subheader("📊 Generated Contract Hierarchy")
         st.dataframe(output_df)
-        
+
         # Download Excel
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             output_df.to_excel(writer, index=False, sheet_name="Hierarchy_Output")
         buffer.seek(0)
-        
+
         st.download_button(
             label="📥 Download Hierarchy Excel",
             data=buffer,
             file_name="Contract_Hierarchy_Output.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-    
+
     except Exception as e:
         st.error(f"❌ Error processing file: {e}")
 else:
