@@ -17,6 +17,8 @@ if uploaded_file:
         df["Contract Type"] = df["Contract Type"].astype(str)
         df["Original Name"] = df["Original Name"].astype(str)
         df["Supplier Legal Entity (Contracts)"] = df["Supplier Legal Entity (Contracts)"].str.strip().str.upper()
+        if "Supplier Parent Child Link Info" not in df.columns:
+            df["Supplier Parent Child Link Info"] = ""
 
         st.subheader("✅ Uploaded Data Preview")
         st.dataframe(df.head())
@@ -40,7 +42,7 @@ if uploaded_file:
                     "Ariba Supplier Name": msa["Ariba Supplier Name"]
                 })
             
-            # Step 2: Identify Parentable Contracts (TOs, SOWs, etc.)
+            # Step 2: Identify Parentable Contracts (TOs, SOWs, other non-MSA contracts)
             parentable_contracts = group[~group["Contract Type"].str.contains("MSA", case=False, na=False)]
             
             # Track all processed sub-child IDs to avoid duplication
@@ -51,19 +53,20 @@ if uploaded_file:
                 # Step 2a: Find related subcontracts using name prefix
                 base_prefix = re.sub(r"-(CO|AM|AMD|SOW).*", "", contract["Original Name"], flags=re.IGNORECASE)
                 
-                related_subs = group[
-                    group["ID"] != contract["ID"]  # Exclude self
-                    & group["Original Name"].str.startswith(base_prefix)
-                    & ~group["ID"].isin(processed_subchild_ids)
-                    & group["Contract Type"].str.contains("Change|Amend|CO|AMD|SOW", case=False, na=False)
-                ]
+                mask_prefix = (
+                    (group["ID"] != contract["ID"]) &
+                    (group["Original Name"].str.startswith(base_prefix)) &
+                    (~group["ID"].isin(processed_subchild_ids)) &
+                    (group["Contract Type"].str.contains("Change|Amend|CO|AMD|SOW", case=False, na=False))
+                )
+                related_subs = group[mask_prefix]
                 
                 # Step 2b: Check metadata parent-child info
-                # If there is info linking this contract as a parent, we treat as Child/Parent
-                metadata_linked_subs = group[
-                    group["Supplier Parent Child Link Info"].astype(str).str.contains(contract["Original Name"], case=False, na=False)
-                    & ~group["ID"].isin(processed_subchild_ids)
-                ]
+                mask_metadata = (
+                    group["Supplier Parent Child Link Info"].astype(str).str.contains(contract["Original Name"], case=False, na=False) &
+                    (~group["ID"].isin(processed_subchild_ids))
+                )
+                metadata_linked_subs = group[mask_metadata]
                 
                 # Combine both sources
                 total_subs = pd.concat([related_subs, metadata_linked_subs]).drop_duplicates("ID")
