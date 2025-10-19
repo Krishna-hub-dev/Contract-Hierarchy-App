@@ -3,8 +3,8 @@ import pandas as pd
 import io
 import re
 
-st.set_page_config(page_title="Contract Hierarchy Builder", layout="wide")
-st.title("📁 Contract Hierarchy Generator – Sequenced Output")
+st.set_page_config(page_title="Nested Contract Hierarchy Builder", layout="wide")
+st.title("📁 Contract Hierarchy Generator – Nested & Sequenced")
 
 uploaded_file = st.file_uploader("📤 Upload Contract Excel File (.xlsx)", type=["xlsx"])
 
@@ -42,40 +42,37 @@ if uploaded_file:
                     "Ariba Supplier Name": msa["Ariba Supplier Name"]
                 })
 
-            # Step 2: Identify Parentable Contracts (TOs, SOWs, other non-MSA contracts)
-            parentable_contracts = group[~group["Contract Type"].str.contains("MSA", case=False, na=False)]
-            
-            processed_subchild_ids = set()
+            # Step 2: Identify non-MSA contracts
+            non_msa_contracts = group[~group["Contract Type"].str.contains("MSA", case=False, na=False)]
+            processed_ids = set()
 
-            for _, contract in parentable_contracts.iterrows():
-
-                # Escape regex special characters
-                safe_name = re.escape(contract["Original Name"])
-                base_prefix = re.sub(r"-(CO|AM|AMD|SOW).*", "", safe_name, flags=re.IGNORECASE)
-
-                # Step 2a: Find related subcontracts using prefix
+            # Helper to get subchildren for a parent contract
+            def get_subchildren(contract_row):
+                safe_name = re.escape(contract_row["Original Name"])
+                
+                # Find subchildren by prefix or metadata link
                 mask_prefix = (
-                    (group["ID"] != contract["ID"]) &
-                    (group["Original Name"].str.startswith(contract["Original Name"].split("-")[0])) &
-                    (~group["ID"].isin(processed_subchild_ids)) &
+                    (group["ID"] != contract_row["ID"]) &
+                    (~group["ID"].isin(processed_ids)) &
+                    (group["Original Name"].str.startswith(contract_row["Original Name"].split("-")[0])) &
                     (group["Contract Type"].str.contains("Change|Amend|CO|AMD|SOW", case=False, na=False))
                 )
-                related_subs = group[mask_prefix]
-
-                # Step 2b: Check metadata parent-child info
                 mask_metadata = (
-                    group["Supplier Parent Child Link Info"].astype(str)
-                        .str.contains(safe_name, case=False, na=False) &
-                    (~group["ID"].isin(processed_subchild_ids))
+                    (~group["ID"].isin(processed_ids)) &
+                    group["Supplier Parent Child Link Info"].astype(str).str.contains(safe_name, case=False, na=False)
                 )
-                metadata_linked_subs = group[mask_metadata]
+                subchildren = pd.concat([group[mask_prefix], group[mask_metadata]]).drop_duplicates("ID")
+                return subchildren
 
-                # Combine both sources
-                total_subs = pd.concat([related_subs, metadata_linked_subs]).drop_duplicates("ID")
+            # Step 3: Build hierarchy
+            for _, contract in non_msa_contracts.iterrows():
+                if contract["ID"] in processed_ids:
+                    continue
 
-                relation_type = "Child/Parent" if not total_subs.empty else "Child"
+                subchildren = get_subchildren(contract)
+                relation_type = "Child/Parent" if not subchildren.empty else "Child"
 
-                # Add the parentable contract first
+                # Add main contract
                 output_rows.append({
                     "FileName": contract["Original Name"],
                     "ContractID": contract["ID"],
@@ -84,9 +81,10 @@ if uploaded_file:
                     "PartyName": supplier,
                     "Ariba Supplier Name": contract["Ariba Supplier Name"]
                 })
+                processed_ids.add(contract["ID"])
 
-                # Step 3: Add Sub Child contracts immediately after their parent
-                for _, sub in total_subs.iterrows():
+                # Add subchildren immediately below
+                for _, sub in subchildren.iterrows():
                     output_rows.append({
                         "FileName": sub["Original Name"],
                         "ContractID": sub["ID"],
@@ -95,7 +93,7 @@ if uploaded_file:
                         "PartyName": supplier,
                         "Ariba Supplier Name": sub["Ariba Supplier Name"]
                     })
-                    processed_subchild_ids.add(sub["ID"])
+                    processed_ids.add(sub["ID"])
 
             # Step 4: Handle orphan contracts (not yet processed)
             remaining = group[~group["ID"].isin([row["ContractID"] for row in output_rows])]
@@ -112,15 +110,7 @@ if uploaded_file:
         # Create output DataFrame
         output_df = pd.DataFrame(output_rows)
 
-        # Define hierarchy order for sorting
-        hierarchy_order = {"Parent": 0, "Child": 1, "Child/Parent": 2, "Sub Child": 3}
-        output_df["Hierarchy_Order"] = output_df["Parent_Child"].map(hierarchy_order)
-
-        # Sort by PartyName and then Hierarchy_Order (keeps children immediately under their parent)
-        output_df = output_df.sort_values(by=["PartyName", "Hierarchy_Order", "FileName"]).reset_index(drop=True)
-        output_df.drop(columns=["Hierarchy_Order"], inplace=True)
-
-        st.subheader("📊 Generated Contract Hierarchy")
+        st.subheader("📊 Generated Contract Hierarchy (Nested & Sequenced)")
         st.dataframe(output_df)
 
         # Download Excel
