@@ -1,108 +1,108 @@
 import streamlit as st
 import pandas as pd
 import io
+import re
 
-st.set_page_config(page_title="Contract Hierarchy Builder – Correct Subchild Logic", layout="wide")
-st.title("📁 Contract Hierarchy Builder – Parent/Child/Subchild Logic")
+st.set_page_config(page_title="Contract Hierarchy Builder", layout="wide")
+st.title("📁 Contract Hierarchy Generator – Full Hierarchy with Subchilds")
 
 uploaded_file = st.file_uploader("📤 Upload Contract Excel File (.xlsx)", type=["xlsx"])
 
 if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
-
-        # Standardize columns
         df.columns = df.columns.str.strip()
         df["Contract Type"] = df["Contract Type"].astype(str)
         df["Original Name"] = df["Original Name"].astype(str)
         df["Supplier Legal Entity (Contracts)"] = df["Supplier Legal Entity (Contracts)"].str.strip().str.upper()
-        if "Supplier Parent Child Link Info" not in df.columns:
-            df["Supplier Parent Child Link Info"] = ""
+        df["Supplier Parent Child Link"] = df.get("Supplier Parent Child Link", "").astype(str)
 
         st.subheader("✅ Uploaded Data Preview")
         st.dataframe(df.head())
 
         output_rows = []
 
-        # Process each supplier separately
+        # Process by supplier
         for supplier, group in df.groupby("Supplier Legal Entity (Contracts)"):
+
+            # Maintain original file order
             group = group.reset_index(drop=True)
 
-            # Build name -> row map
-            name_to_row = {row["Original Name"].strip(): row for idx, row in group.iterrows()}
+            # Identify Parent Contracts
+            parent_keywords = ["MSA", "SERVICE AGREEMENT", "TECHNOLOGY AGREEMENT", "PRODUCT AND SERVICE AGREEMENT"]
+            parents = group[group["Contract Type"].str.contains('|'.join(parent_keywords), case=False, na=False)]
 
-            # Build reference maps
-            # referenced_by_map: contract_name -> list of contracts referencing it
-            referenced_by_map = {}
-            # references_map: contract_name -> list of contracts it references
-            references_map = {}
-
-            for idx, row in group.iterrows():
-                name = row["Original Name"].strip()
-                link_info = str(row.get("Supplier Parent Child Link Info", "")).upper()
-                references = [l.strip() for l in link_info.split(';') if l.strip()]
-                references_map[name] = references
-                for ref in references:
-                    referenced_by_map.setdefault(ref, []).append(name)
-
-            # Identify Parents (MSA, Service Agreement, Technology Agreement, Product & Service Agreement)
-            parent_mask = group["Contract Type"].str.contains(
-                "MSA|Service Agreement|Technology Agreement|Product and Service Agreement", case=False, na=False)
-            parents = [row["Original Name"].strip() for idx, row in group[parent_mask].iterrows()]
-
+            # Keep track of contracts that are already added
             added_contracts = set()
 
-            # Recursive function to traverse hierarchy
-            def traverse(contract_name, hierarchy_type):
-                if contract_name in added_contracts:
-                    return
-                row = name_to_row[contract_name]
+            for _, parent in parents.iterrows():
                 output_rows.append({
-                    "FileName": contract_name,
-                    "ContractID": row["ID"],
-                    "Parent_Child": hierarchy_type,
-                    "ContractType": row["Contract Type"],
-                    "PartyName": supplier,
-                    "Ariba Supplier Name": row.get("Ariba Supplier Name", "")
+                    "FileName": parent["Original Name"],
+                    "ContractID": parent["ID"],
+                    "Parent_Child": "Parent",
+                    "ContractType": parent["Contract Type"],
+                    "PartyName": parent["Supplier Legal Entity (Contracts)"],
+                    "Ariba Supplier Name": parent["Ariba Supplier Name"]
                 })
-                added_contracts.add(contract_name)
+                added_contracts.add(parent["Original Name"])
 
-                # Determine children
-                for child_name in referenced_by_map.get(contract_name, []):
-                    # Child/Parent if it has its own children
-                    if referenced_by_map.get(child_name):
-                        traverse(child_name, "Child/Parent")
-                    else:
-                        # Subchild if it references a Child/Parent
-                        refs = references_map.get(child_name, [])
-                        if any(r in referenced_by_map for r in refs):
-                            traverse(child_name, "Subchild")
-                        else:
-                            traverse(child_name, "Child")
+                # Get all children (any contract mentioning this parent in Supplier Parent Child Link)
+                children = group[group["Supplier Parent Child Link"].str.contains(parent["Original Name"], na=False)]
+                # Sort children by original order
+                children = children.reset_index(drop=True)
 
-            # First, traverse all Parents
-            for p in parents:
-                traverse(p, "Parent")
+                for _, child in children.iterrows():
+                    if child["Original Name"] in added_contracts:
+                        continue
 
-            # Then, traverse remaining contracts not yet added
-            for idx, row in group.iterrows():
-                name = row["Original Name"].strip()
-                if name not in added_contracts:
-                    # Determine type
-                    if referenced_by_map.get(name):
-                        traverse(name, "Child/Parent")
-                    elif any(r in referenced_by_map for r in references_map.get(name, [])):
-                        traverse(name, "Subchild")
-                    else:
-                        traverse(name, "Child")
+                    # Check if this child itself has children
+                    subchildren = group[group["Supplier Parent Child Link"].str.contains(child["Original Name"], na=False)]
+                    relation_type = "Child/Parent" if not subchildren.empty else "Child"
 
-        # Convert output to DataFrame
+                    output_rows.append({
+                        "FileName": child["Original Name"],
+                        "ContractID": child["ID"],
+                        "Parent_Child": relation_type,
+                        "ContractType": child["Contract Type"],
+                        "PartyName": child["Supplier Legal Entity (Contracts)"],
+                        "Ariba Supplier Name": child["Ariba Supplier Name"]
+                    })
+                    added_contracts.add(child["Original Name"])
+
+                    # Add subchildren
+                    for _, sub in subchildren.iterrows():
+                        if sub["Original Name"] in added_contracts:
+                            continue
+                        output_rows.append({
+                            "FileName": sub["Original Name"],
+                            "ContractID": sub["ID"],
+                            "Parent_Child": "Subchild",
+                            "ContractType": sub["Contract Type"],
+                            "PartyName": sub["Supplier Legal Entity (Contracts)"],
+                            "Ariba Supplier Name": sub["Ariba Supplier Name"]
+                        })
+                        added_contracts.add(sub["Original Name"])
+
+            # Handle orphan contracts (not linked to any Parent)
+            orphans = group[~group["Original Name"].isin(added_contracts)]
+            for _, orphan in orphans.iterrows():
+                output_rows.append({
+                    "FileName": orphan["Original Name"],
+                    "ContractID": orphan["ID"],
+                    "Parent_Child": "Child",  # Direct child of supplier Parent
+                    "ContractType": orphan["Contract Type"],
+                    "PartyName": orphan["Supplier Legal Entity (Contracts)"],
+                    "Ariba Supplier Name": orphan["Ariba Supplier Name"]
+                })
+                added_contracts.add(orphan["Original Name"])
+
+        # Final output
         output_df = pd.DataFrame(output_rows)
 
-        st.subheader("📊 Generated Contract Hierarchy (Parent → Child → Child/Parent → Subchild)")
+        st.subheader("📊 Generated Contract Hierarchy")
         st.dataframe(output_df)
 
-        # Excel download
+        # Download Excel
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             output_df.to_excel(writer, index=False, sheet_name="Hierarchy_Output")
@@ -117,5 +117,6 @@ if uploaded_file:
 
     except Exception as e:
         st.error(f"❌ Error processing file: {e}")
+
 else:
     st.info("👆 Please upload your Excel file to begin.")
