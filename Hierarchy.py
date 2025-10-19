@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 
 st.set_page_config(page_title="Contract Hierarchy Builder – Detect Subchild Parents", layout="wide")
-st.title("📁 Contract Hierarchy Builder — Parent / Child / Subchild Hierarchy")
+st.title("📁 Contract Hierarchy Builder — Promote Parents of Subchildren")
 
 # --- File upload ---
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"])
@@ -40,25 +40,27 @@ df["Effective Date"] = pd.to_datetime(df["Effective Date"], errors="coerce")
 st.subheader("Uploaded Data (preview)")
 st.dataframe(df.head())
 
-# Helper functions
+# Helper: normalize text for matching
 def norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
+# Precompute textual tokens for each contract (name + effective date variants)
 def date_variants(dt):
     if pd.isna(dt):
         return []
     variants = []
     try:
         d = pd.to_datetime(dt)
-        variants.append(d.strftime("%-m/%-d/%Y"))
-        variants.append(d.strftime("%m/%d/%Y"))
-        variants.append(d.strftime("%b %d, %Y"))
-        variants.append(d.strftime("%B %d, %Y"))
-        variants.append(d.strftime("%Y-%m-%d"))
+        variants.append(d.strftime("%-m/%-d/%Y"))      # 6/22/2020
+        variants.append(d.strftime("%m/%d/%Y"))        # 06/22/2020
+        variants.append(d.strftime("%b %d, %Y"))       # Jun 22, 2020
+        variants.append(d.strftime("%B %d, %Y"))       # June 22, 2020
+        variants.append(d.strftime("%Y-%m-%d"))        # 2020-06-22
     except Exception:
         pass
     return list(set(variants))
 
+# Output columns
 OUTPUT_COLS = ["FileName", "ContractID", "Parent_Child", "ContractType", "PartyName", "Ariba Supplier Name", "Workspace ID"]
 
 final_rows = []
@@ -69,30 +71,30 @@ grouped = df.groupby(group_by_cols, dropna=False)
 
 for (party_name, ariba_name), group in grouped:
     group = group.reset_index(drop=True)
-    
-    # Lookup maps
+
+    # Build lookup maps
     contract_search_tokens = {}
     for i, row in group.iterrows():
         tokens = set()
         tokens.add(norm(row["Original Name"]))
         for dv in date_variants(row["Effective Date"]):
             tokens.add(dv.lower())
+        # name fragments
         name_fragments = re.split(r"[^a-z0-9]+", norm(row["Original Name"]))
         for frag in name_fragments:
             if len(frag) >= 4:
                 tokens.add(frag)
         contract_search_tokens[i] = tokens
 
-    # Step 1: classify initial Parents (Master / MSA)
+    # Step A: initial classification
     hierarchy = {i: "Child" for i in group.index}
     parent_mask = group["Contract Type"].str.contains(r"\b(MSA|Master Services Agreement|Service Agreement|Technology Agreement|Product and Service Agreement)\b", case=False, na=False)
     for i in group[parent_mask].index:
         hierarchy[i] = "Parent"
 
-    # Step 2: references mapping
-    references_map = {i: set() for i in group.index}       # contracts this contract references
-    referenced_by_map = {i: set() for i in group.index}   # contracts referencing this contract
-    
+    # Step B: Build references maps
+    references_map = {i: set() for i in group.index}
+    referenced_by_map = {i: set() for i in group.index}
     for i, row in group.iterrows():
         link_text = norm(row["Supplier Parent Child agreement links"])
         if not link_text:
@@ -100,38 +102,41 @@ for (party_name, ariba_name), group in grouped:
         for j, tokens in contract_search_tokens.items():
             if i == j:
                 continue
+            matched = False
             for tok in tokens:
                 if not tok:
                     continue
-                if re.search(r"\b" + re.escape(tok) + r"\b", link_text) or (len(tok)>=4 and tok in link_text):
-                    references_map[i].add(j)
-                    referenced_by_map[j].add(i)
+                if re.search(r"\b" + re.escape(tok) + r"\b", link_text):
+                    matched = True
                     break
+                if len(tok) <= 6 and tok.isdigit() and tok in link_text:
+                    matched = True
+                    break
+                if len(tok) >= 4 and tok in link_text:
+                    matched = True
+                    break
+            if matched:
+                references_map[i].add(j)
+                referenced_by_map[j].add(i)
 
-    # Step 3: Promote any contract referenced by others to Child/Parent unless already Parent
+    # Step C: Promote contracts that are referenced by others
     for j in group.index:
         if hierarchy[j] != "Parent" and referenced_by_map.get(j):
             hierarchy[j] = "Child/Parent"
 
-    # Step 4: Determine Subchilds based on links to other Child/Parent
+    # Step D: Correct Subchild/Child based on references
     for i in group.index:
-        if hierarchy[i] == "Child" and references_map[i]:
-            hierarchy[i] = "Subchild"
-            for ref in references_map[i]:
-                if hierarchy[ref] != "Parent":
-                    hierarchy[ref] = "Child/Parent"
+        if hierarchy[i] == "Child":
+            refs = references_map[i]
+            has_parent_ref = any(hierarchy[r]=="Parent" for r in refs)
+            has_child_ref = any(hierarchy[r]=="Child" or hierarchy[r]=="Child/Parent" for r in refs)
+            
+            if has_parent_ref and not has_child_ref:
+                hierarchy[i] = "Child"
+            elif has_child_ref:
+                hierarchy[i] = "Subchild"
 
-    # Step 5: recursive promotion for subchilds’ parents
-    def promote_parents(idx):
-        for ref in references_map[idx]:
-            if hierarchy[ref] != "Parent":
-                hierarchy[ref] = "Child/Parent"
-                promote_parents(ref)
-    for i in group.index:
-        if hierarchy[i] == "Subchild":
-            promote_parents(i)
-
-    # Step 6: Output in order Parent → Child → Child/Parent → Subchild
+    # Step E: Ensure ordering Parent -> Child -> Child/Parent -> Subchild
     added = set()
     def append_row(idx, rel_type):
         row = group.loc[idx]
@@ -146,20 +151,27 @@ for (party_name, ariba_name), group in grouped:
         })
         added.add(idx)
 
-    # Add hierarchy recursively
-    def add_hierarchy(idx):
-        if idx in added:
-            return
-        rel_type = hierarchy[idx]
-        append_row(idx, rel_type)
-        for child_idx in sorted(referenced_by_map.get(idx, []), key=lambda x: group.index.get_loc(x)):
-            add_hierarchy(child_idx)
-    for p_idx in [i for i in group.index if hierarchy[i]=="Parent"]:
-        add_hierarchy(p_idx)
-    # add any remaining
-    for i in group.index:
-        if i not in added:
-            append_row(i, hierarchy[i])
+    parents_idx = [i for i in group.index if hierarchy[i] == "Parent"]
+    for p_idx in parents_idx:
+        append_row(p_idx, "Parent")
+        direct_children = sorted(list(referenced_by_map.get(p_idx, set())), key=lambda x: group.index.get_loc(x))
+        for c_idx in direct_children:
+            if c_idx in added:
+                continue
+            rel = hierarchy.get(c_idx, "Child")
+            append_row(c_idx, rel)
+            subkids = sorted(list(referenced_by_map.get(c_idx, set())), key=lambda x: group.index.get_loc(x))
+            for s_idx in subkids:
+                if s_idx in added:
+                    continue
+                append_row(s_idx, "Subchild")
+
+    # Add any remaining contracts
+    for i, row in group.iterrows():
+        if i in added:
+            continue
+        rel = hierarchy.get(i, "Child")
+        append_row(i, rel)
 
 # Build final DataFrame
 out_df = pd.DataFrame(final_rows, columns=OUTPUT_COLS)
@@ -167,15 +179,10 @@ out_df = pd.DataFrame(final_rows, columns=OUTPUT_COLS)
 st.subheader("Generated Hierarchy (Parent → Child → Child/Parent → Subchild)")
 st.dataframe(out_df, use_container_width=True)
 
-# Download Excel
+# Download as Excel
 to_download = io.BytesIO()
 with pd.ExcelWriter(to_download, engine="openpyxl") as writer:
     out_df.to_excel(writer, index=False, sheet_name="Hierarchy_Output")
 to_download.seek(0)
 
-st.download_button(
-    "⬇️ Download Hierarchy Excel",
-    data=to_download,
-    file_name="Contract_Hierarchy_Output.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+st.download_button("⬇️ Download Hierarchy Excel", data=to_download, file_name="Contract_Hierarchy_Output.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
