@@ -1,97 +1,93 @@
 import streamlit as st
 import pandas as pd
 import io
-from datetime import datetime
+import re
 
 st.set_page_config(page_title="Contract Hierarchy Builder", layout="wide")
-st.title("📁 Contract Hierarchy Generator by Effective Date Logic")
-
-st.write("Upload your Excel file to generate Parent–Child–Subchild relationships automatically using Effective Date logic.")
+st.title("📁 Contract Hierarchy Generator – MSA, Task Order & Change Agreement Logic")
 
 uploaded_file = st.file_uploader("📤 Upload Contract Excel File (.xlsx)", type=["xlsx"])
 
 if uploaded_file:
     try:
         df = pd.read_excel(uploaded_file)
+
+        # Normalize text
+        df.columns = df.columns.str.strip()
+        df["Contract Type"] = df["Contract Type"].astype(str)
+        df["Original Name"] = df["Original Name"].astype(str)
+
+        # Clean supplier names
+        df["Supplier Legal Entity (Contracts)"] = df["Supplier Legal Entity (Contracts)"].str.strip().str.upper()
+
         st.subheader("✅ Uploaded Data Preview")
         st.dataframe(df.head())
 
-        # Ensure date column is in datetime format
-        df["Effective Date"] = pd.to_datetime(df["Effective Date"], errors="coerce")
-
-        # Remove rows without effective date or supplier
-        df = df.dropna(subset=["Effective Date", "Supplier Legal Entity (Contracts)"])
-
         output_rows = []
 
-        # Loop by supplier
+        # Process by supplier
         for supplier, group in df.groupby("Supplier Legal Entity (Contracts)"):
-            group = group.sort_values(by="Effective Date")
 
-            # Get earliest (MSA) as parent
-            if not group.empty:
-                parent_row = group.iloc[0]
-                parent_id = parent_row["ID"]
-                parent_date = parent_row["Effective Date"]
+            # Find Parent (MSA)
+            msa_rows = group[group["Contract Type"].str.contains("MSA", case=False, na=False)]
+            if not msa_rows.empty:
+                msa = msa_rows.iloc[0]  # Assuming 1 MSA per supplier
+                msa_prefix = re.sub(r"[-_].*", "", msa["Original Name"])
 
                 output_rows.append({
-                    "FileName": parent_row["Original Name"],
-                    "ContractID": parent_row["ID"],
+                    "FileName": msa["Original Name"],
+                    "ContractID": msa["ID"],
                     "Parent_Child": "Parent",
-                    "ContractType": parent_row["Contract Type"],
-                    "PartyName": parent_row["Supplier Legal Entity (Contracts)"],
-                    "Ariba Supplier Name": parent_row["Ariba Supplier Name"],
-                    "Workspace ID": parent_row["Workspace ID"],
-                    "Effective Date": parent_row["Effective Date"].date()
+                    "ContractType": msa["Contract Type"],
+                    "PartyName": msa["Supplier Legal Entity (Contracts)"],
+                    "Ariba Supplier Name": msa["Ariba Supplier Name"]
+                })
+            else:
+                msa = None
+                msa_prefix = ""
+
+            # Identify Task Orders
+            task_orders = group[group["Contract Type"].str.contains("Task Order|SOW", case=False, na=False)]
+
+            for _, task in task_orders.iterrows():
+                # Find related Change Agreements
+                base_prefix = re.sub(r"[-_](CO|AM|AMD).*", "", task["Original Name"], flags=re.IGNORECASE)
+                related_changes = group[
+                    group["Contract Type"].str.contains("Change|Amend", case=False, na=False)
+                    & group["Original Name"].str.contains(base_prefix.split('-')[0], case=False, na=False)
+                ]
+
+                relation_type = "Child/Parent" if not related_changes.empty else "Child"
+
+                output_rows.append({
+                    "FileName": task["Original Name"],
+                    "ContractID": task["ID"],
+                    "Parent_Child": relation_type,
+                    "ContractType": task["Contract Type"],
+                    "PartyName": task["Supplier Legal Entity (Contracts)"],
+                    "Ariba Supplier Name": task["Ariba Supplier Name"]
                 })
 
-                # Find Task Orders (children)
-                for _, child_row in group.iloc[1:].iterrows():
-                    child_date = child_row["Effective Date"]
-
-                    # Check if child references parent's date (via link text or equal date)
-                    ref_text = str(child_row.get("Supplier Parent Child agreement links", ""))
-                    if str(parent_date.date()) in ref_text or abs((child_date - parent_date).days) > 0:
-                        relation_type = "Child/Parent" if "Task Order" in str(child_row["Contract Type"]) else "Child"
-
-                        output_rows.append({
-                            "FileName": child_row["Original Name"],
-                            "ContractID": child_row["ID"],
-                            "Parent_Child": relation_type,
-                            "ContractType": child_row["Contract Type"],
-                            "PartyName": child_row["Supplier Legal Entity (Contracts)"],
-                            "Ariba Supplier Name": child_row["Ariba Supplier Name"],
-                            "Workspace ID": child_row["Workspace ID"],
-                            "Effective Date": child_row["Effective Date"].date()
-                        })
-
-                        # Now find subchilds (Change Orders) for this Task Order
-                        subchildren = group[
-                            (group["Effective Date"] > child_row["Effective Date"]) &
-                            (group["Contract Type"].str.contains("Change", case=False, na=False))
-                        ]
-                        for _, sub in subchildren.iterrows():
-                            sub_ref_text = str(sub.get("Supplier Parent Child agreement links", ""))
-                            if str(child_row["Effective Date"].date()) in sub_ref_text:
-                                output_rows.append({
-                                    "FileName": sub["Original Name"],
-                                    "ContractID": sub["ID"],
-                                    "Parent_Child": "Sub Child",
-                                    "ContractType": sub["Contract Type"],
-                                    "PartyName": sub["Supplier Legal Entity (Contracts)"],
-                                    "Ariba Supplier Name": sub["Ariba Supplier Name"],
-                                    "Workspace ID": sub["Workspace ID"],
-                                    "Effective Date": sub["Effective Date"].date()
-                                })
+                # Add Change Agreements (Sub Child)
+                for _, change in related_changes.iterrows():
+                    output_rows.append({
+                        "FileName": change["Original Name"],
+                        "ContractID": change["ID"],
+                        "Parent_Child": "Sub Child",
+                        "ContractType": change["Contract Type"],
+                        "PartyName": change["Supplier Legal Entity (Contracts)"],
+                        "Ariba Supplier Name": change["Ariba Supplier Name"]
+                    })
 
         output_df = pd.DataFrame(output_rows)
-        st.write("### 🧾 Generated Hierarchy Result")
+
+        st.subheader("📊 Generated Contract Hierarchy")
         st.dataframe(output_df)
 
         # Download Excel
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            output_df.to_excel(writer, index=False, sheet_name="Contract_Hierarchy")
+            output_df.to_excel(writer, index=False, sheet_name="Hierarchy_Output")
         buffer.seek(0)
 
         st.download_button(
@@ -102,6 +98,6 @@ if uploaded_file:
         )
 
     except Exception as e:
-        st.error(f"❌ Error while processing file: {e}")
+        st.error(f"❌ Error processing file: {e}")
 else:
     st.info("👆 Please upload your Excel file to begin.")
